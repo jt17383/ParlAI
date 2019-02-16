@@ -56,7 +56,7 @@ class ContextKnowledgeEncoder(nn.Module):
         self.embed_dim = transformer.embeddings.embedding_dim
         self.transformer = transformer
 
-    def forward(self, src_tokens, know_tokens, ck_mask, cs_ids, use_cs_ids=True):
+    def forward(self, src_tokens, know_tokens, ck_mask, cs_ids, use_cs_ids):
         # encode the context, pretty basic
         context_encoded, context_mask = self.transformer(src_tokens)
 

@@ -14,7 +14,7 @@ import numpy as np
 
 from parlai.core.torch_agent import Batch as TABatch
 from parlai.core.metrics import _f1_score
-from parlai.core.utils import padded_tensor
+from parlai.core.utils import padded_tensor, round_sigfigs
 
 from parlai.agents.transformer.transformer import TransformerGeneratorAgent
 
@@ -69,6 +69,11 @@ DEFAULT_OPTS = {
 
 
 class _GenericWizardAgent(TransformerGeneratorAgent):
+    @classmethod
+    def dictionary_class(cls):
+        import parlai_internal.projects.wizard.generator.agents as a
+        return a._WizardGeneratorDictionary
+
     # todo:
     # - dict agent stuff
     @classmethod
@@ -144,11 +149,14 @@ class EndToEndAgent(_GenericWizardAgent):
         batch['know_vec'] = th.zeros(bsz, 2, 2).long().cuda()
         batch['ck_mask'] = th.ones(bsz, 2).byte().cuda()
         batch['cs_ids'] = th.zeros(bsz).long().cuda()
+        batch['use_cs_ids'] = True
         return batch
 
     def compute_loss(self, batch, return_output=False):
         # first compute our regular forced decoding loss
         tokenloss, model_output = super().compute_loss(batch, return_output=True)
+        # in the original experiments, log2 was used instead of ln
+        tokenloss *= 1.4426950408889634
 
         encoder_states = model_output[2]
         ctx_know_attn = encoder_states[2]
@@ -156,12 +164,18 @@ class EndToEndAgent(_GenericWizardAgent):
         if self.knowledge_alpha == 0.0:
             loss = tokenloss
         else:
+            _, know_pred = ctx_know_attn.max(1)
+            know_acc = (know_pred == batch.cs_ids).float().sum().item()
+            know_chance = batch.ck_mask.sum(1).float().reciprocal().sum().item()
+            self.metrics['know_chance'] += know_chance
+            self.metrics['bsz'] += batch.text_vec.size(0)
+            self.metrics['know_acc'] += know_acc
             know_loss = th.nn.functional.cross_entropy(
-                ctx_know_attn.float(),
+                ctx_know_attn,
                 batch.cs_ids,
-                reduce=True,
-                size_average=True
+                reduction='mean',
             )
+            self.metrics['know_loss'] += know_loss.item() * batch.text_vec.size(0)
             loss = (
                 (1 - self.knowledge_alpha) * tokenloss +
                 self.knowledge_alpha * know_loss
@@ -170,6 +184,20 @@ class EndToEndAgent(_GenericWizardAgent):
             return (loss, model_output)
         else:
             return loss
+
+    def reset_metrics(self):
+        super().reset_metrics()
+        self.metrics['bsz'] = 0.0
+        self.metrics['know_acc'] = 0.0
+        self.metrics['know_loss'] = 0.0
+        self.metrics['know_chance'] = 0.0
+
+    def report(self):
+        r = super().report()
+        r['know_loss'] = round_sigfigs(self.metrics['know_loss'] / self.metrics['bsz'], 4)
+        r['know_acc'] = round_sigfigs(self.metrics['know_acc'] / self.metrics['bsz'], 4)
+        r['know_chance'] = round_sigfigs(self.metrics['know_chance'] / self.metrics['bsz'], 4)
+        return r
 
     def _parse_knowledge(self, obs):
         if 'knowledge_parsed' in obs:
@@ -308,6 +336,7 @@ class EndToEndAgent(_GenericWizardAgent):
             batch.know_vec,
             batch.ck_mask,
             batch.cs_ids,
+            batch.use_cs_ids,
         )
 
     def eval_step(self, batch):
@@ -320,7 +349,7 @@ class EndToEndAgent(_GenericWizardAgent):
         for cs, kp, knowledges in zip(batch.cs_ids, self.know_pred, batch.knowledge):
             gold = knowledges[cs.item()]
             chosen = knowledges[kp.item()]
-            self.custom_metrics['cs_f1'].append(_f1_score(
+            self.metrics['cs_f1'].append(_f1_score(
                 chosen.replace(TOKEN_KNOWLEDGE, ''),
                 [gold.replace(TOKEN_KNOWLEDGE, '')]
             ))
