@@ -527,6 +527,11 @@ class TorchGeneratorAgent(TorchAgent):
         self.model.eval()
         cand_scores = None
 
+        if batch.label_vec is not None:
+            # calculate loss on targets with teacher forcing
+            loss = self.compute_loss(batch)  # noqa: F841  we need the side effects
+            self.metrics['loss'] += loss.item()
+
         preds = None
         if self.skip_generation:
             warn_once(
@@ -553,11 +558,6 @@ class TorchGeneratorAgent(TorchAgent):
 
             if self.beam_dot_log is True:
                 self._write_beam_dots(batch.text_vec, beams)
-
-        if batch.label_vec is not None:
-            # calculate loss on targets with teacher forcing
-            loss = self.compute_loss(batch)  # noqa: F841  we need the side effects
-            self.metrics['loss'] += loss.item()
 
         cand_choices = None
         # TODO: abstract out the scoring here
