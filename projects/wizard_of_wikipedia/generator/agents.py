@@ -54,9 +54,8 @@ DEFAULT_OPTS = {
     "optimizer": "adam",
     "lr_scheduler": "invsqrt",
     "warmup_updates": 1000,
-    "betas": "0.9,0.98",
+    #"betas": "0.9,0.98",
     "clip_norm": 0.1,
-    "arch": "transformer",
     "ffn_size": 512,
     "embedding_size": 256,
     "n_heads": 2,
@@ -69,10 +68,10 @@ DEFAULT_OPTS = {
 
 
 class _GenericWizardAgent(TransformerGeneratorAgent):
-    @classmethod
-    def dictionary_class(cls):
-        import parlai_internal.projects.wizard.generator.agents as a
-        return a._WizardGeneratorDictionary
+    # @classmethod
+    # def dictionary_class(cls):
+    #     import parlai_internal.projects.wizard.generator.agents as a
+    #     return a._WizardGeneratorDictionary
 
     # todo:
     # - dict agent stuff
@@ -133,9 +132,11 @@ class TwoStageAgent(_GenericWizardAgent):
         return obs
 
 
+from functools import lru_cache
 class EndToEndAgent(_GenericWizardAgent):
     def __init__(self, opt, shared=None):
         super().__init__(opt, shared)
+        self._vectorize_text = lru_cache(int(2 ** 20))(self._vectorize_text)
 
         # knowledge truncate defaults to the same as --truncate
         self.knowledge_truncate = opt.get('knowledge_truncate')
@@ -154,15 +155,13 @@ class EndToEndAgent(_GenericWizardAgent):
 
     def compute_loss(self, batch, return_output=False):
         # first compute our regular forced decoding loss
-        tokenloss, model_output = super().compute_loss(batch, return_output=True)
-        # in the original experiments, log2 was used instead of ln
-        tokenloss *= 1.4426950408889634
+        token_loss, model_output = super().compute_loss(batch, return_output=True)
 
         encoder_states = model_output[2]
         ctx_know_attn = encoder_states[2]
 
         if self.knowledge_alpha == 0.0:
-            loss = tokenloss
+            loss = token_loss
         else:
             _, know_pred = ctx_know_attn.max(1)
             know_acc = (know_pred == batch.cs_ids).float().sum().item()
@@ -177,7 +176,7 @@ class EndToEndAgent(_GenericWizardAgent):
             )
             self.metrics['know_loss'] += know_loss.item() * batch.text_vec.size(0)
             loss = (
-                (1 - self.knowledge_alpha) * tokenloss +
+                (1 - self.knowledge_alpha) * token_loss +
                 self.knowledge_alpha * know_loss
             )
         if return_output:
@@ -194,9 +193,11 @@ class EndToEndAgent(_GenericWizardAgent):
 
     def report(self):
         r = super().report()
-        r['know_loss'] = round_sigfigs(self.metrics['know_loss'] / self.metrics['bsz'], 4)
-        r['know_acc'] = round_sigfigs(self.metrics['know_acc'] / self.metrics['bsz'], 4)
-        r['know_chance'] = round_sigfigs(self.metrics['know_chance'] / self.metrics['bsz'], 4)
+        bsz = max(self.metrics['bsz'], 1)
+        rounded = lambda x: round_sigfigs(self.metrics[x] / bsz, 4)
+        r['know_loss'] = rounded('know_loss')
+        r['know_acc'] = rounded('know_acc')
+        r['know_chance'] = rounded('know_chance')
         return r
 
     def _parse_knowledge(self, obs):
@@ -275,10 +276,8 @@ class EndToEndAgent(_GenericWizardAgent):
             for k in flattened_knowledge
         ]
         knowledge_vec, _ = padded_tensor(
-            knowledge_vec, self.NULL_IDX, self.use_cuda, left_padded=True,
+            knowledge_vec, self.NULL_IDX, self.use_cuda, left_padded=False,
         )
-        # make sure there is always and end_token in knowledge
-        knowledge_vec[:, -1] = self.END_IDX
         T = knowledge_vec.size(-1)
         knowledge_vec = knowledge_vec.view(N, K, T)
 
@@ -318,12 +317,6 @@ class EndToEndAgent(_GenericWizardAgent):
         group.add_argument(
             '--max-knowledge', type=int,
             help='Reduce the amount of negative knowledge at train time.'
-        )
-        argparser.add_argument(
-            '--use-sqrt', type='bool', default=True,
-        )
-        argparser.add_argument(
-            '--use-embed-dim', type='bool', default=False
         )
         argparser.add_argument(
             '--knowledge-alpha', type=float, default=0.95,
